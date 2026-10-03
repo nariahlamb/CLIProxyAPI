@@ -905,6 +905,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		SupportPromptCacheKey *bool                               `json:"support-prompt-cache-key"`
 		RequestRetry          *int                                `json:"request-retry"`
 		RequestScopedErrors   *[]config.RequestScopedErrorRule    `json:"request-scoped-errors"`
+		EndpointCapabilities  *[]string                           `json:"endpoint-capabilities"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -985,6 +986,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.RequestScopedErrors != nil {
 		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
+	}
+	if body.Value.EndpointCapabilities != nil {
+		entry.EndpointCapabilities = append([]string(nil), *body.Value.EndpointCapabilities...)
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
 	h.cfg.OpenAICompatibility[targetIndex] = entry

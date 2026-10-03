@@ -97,6 +97,13 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
+		// Add grouping/capability fields so clients can present a grouped catalog
+		for _, k := range []string{"type", "groups", "display_name"} {
+			if v, exists := model[k]; exists {
+				filteredModel[k] = v
+			}
+		}
+
 		filteredModels[i] = filteredModel
 	}
 
