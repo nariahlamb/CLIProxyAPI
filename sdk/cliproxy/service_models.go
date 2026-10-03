@@ -796,6 +796,9 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		info.Thinking = modelconfig.NormalizeThinkingSupport(thinkingSupport)
 		info.SupportedInputModalities = normalizeCompatConfigModalities(model.InputModalities)
 		info.SupportedOutputModalities = normalizeCompatConfigModalities(model.OutputModalities)
+		if len(compat.EndpointCapabilities) > 0 {
+			info.EndpointCapabilities = append([]string(nil), compat.EndpointCapabilities...)
+		}
 		models = append(models, info)
 	}
 	return models

@@ -104,6 +104,16 @@ type ModelInfo struct {
 	// IsCompat enables compatibility handling for this configured API-key model.
 	// It is internal metadata and is not exposed in model listings.
 	IsCompat bool `json:"-"`
+
+	// EndpointCapabilities records which API dialects the upstream site actually
+	// serves for this model (probed): "chat", "responses", "anthropic". Empty
+	// means unknown, in which case all three are advertised.
+	EndpointCapabilities []string `json:"endpoint_capabilities,omitempty"`
+
+	// Groups lists the logical capability/provider groups this model belongs to
+	// (e.g. "openai-compatibility", "claude", "gemini", "tools", "thinking").
+	// A model may belong to multiple groups. Derived from Type and capabilities.
+	Groups []string `json:"groups,omitempty"`
 }
 
 // ModelConfig holds optional runtime overrides for a model definition.
@@ -1690,6 +1700,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
 		}
+		if groups := model.ResolveGroups(); len(groups) > 0 {
+			result["groups"] = append([]string(nil), groups...)
+		}
 		return result
 
 	case "claude":
@@ -1894,4 +1907,286 @@ func (r *ModelRegistry) ClientRegistrationEpoch(clientID string) uint64 {
 func (r *ModelRegistry) GetModelsForClient(clientID string) []*ModelInfo {
 	models, _ := r.GetModelsAndEpochForClient(clientID)
 	return models
+}
+
+// vendorPattern pairs a lowercase model-id matcher with a canonical vendor group.
+// Mirrors cherry-studio's VENDOR_PATTERNS: vendor identity is inferred from the
+// (namespace-stripped) model id, NOT from upstream metadata, so a model pulled
+// from a plain openai-compatibility relay still gets a meaningful family group.
+type vendorPattern struct {
+	group string
+	match func(id string) bool
+}
+
+func hasPrefixFold(id, p string) bool { return strings.HasPrefix(id, p) }
+
+var vendorPatterns = []vendorPattern{
+	{"claude", func(id string) bool { return strings.HasPrefix(id, "claude") || strings.HasPrefix(id, "anthropic.") }},
+	{"gemini", func(id string) bool {
+		for _, p := range []string{"gemini", "palm", "veo", "imagen", "learnlm", "lyria"} {
+			if strings.HasPrefix(id, p) {
+				return true
+			}
+		}
+		return false
+	}},
+	{"gemma", func(id string) bool { return strings.HasPrefix(id, "gemma") }},
+	{"grok", func(id string) bool { return strings.HasPrefix(id, "grok") }},
+	{"qwen", func(id string) bool {
+		for _, p := range []string{"qwen", "qwq", "qvq", "tongyi"} {
+			if strings.HasPrefix(id, p) {
+				return true
+			}
+		}
+		return false
+	}},
+	{"deepseek", func(id string) bool { return strings.HasPrefix(id, "deepseek") }},
+	{"glm", func(id string) bool {
+		for _, p := range []string{"glm", "chatglm", "cogview", "cogvideo", "codegeex"} {
+			if strings.HasPrefix(id, p) {
+				return true
+			}
+		}
+		return false
+	}},
+	{"kimi", func(id string) bool {
+		return strings.HasPrefix(id, "kimi") || strings.HasPrefix(id, "moonshot")
+	}},
+	{"minimax", func(id string) bool { return strings.HasPrefix(id, "minimax") || strings.HasPrefix(id, "abab") }},
+	{"hunyuan", func(id string) bool {
+		return strings.HasPrefix(id, "hunyuan") || strings.HasPrefix(id, "hy-") || strings.HasPrefix(id, "hy")
+	}},
+	{"mistral", func(id string) bool {
+		for _, p := range []string{"mistral", "pixtral", "codestral", "ministral", "voxtral", "devstral", "mixtral", "magistral"} {
+			if strings.HasPrefix(id, p) {
+				return true
+			}
+		}
+		return false
+	}},
+	{"doubao", func(id string) bool {
+		for _, p := range []string{"doubao", "skylark", "seed", "ep-"} {
+			if strings.HasPrefix(id, p) {
+				return true
+			}
+		}
+		return false
+	}},
+	{"openai", func(id string) bool {
+		for _, p := range []string{"gpt", "chatgpt", "codex", "o1", "o3", "o4", "davinci", "babbage"} {
+			if strings.HasPrefix(id, p) {
+				return true
+			}
+		}
+		return false
+	}},
+	{"image", func(id string) bool {
+		for _, p := range []string{"dall-e", "cogview", "cogvideo", "imagen", "seedream", "stable-diffusion", "flux"} {
+			if strings.HasPrefix(id, p) {
+				return true
+			}
+		}
+		return false
+	}},
+}
+
+// matchVendor returns the canonical family group for a model id, or "" if unknown.
+func matchVendor(id string) string {
+	for _, vp := range vendorPatterns {
+		if vp.match(id) {
+			return vp.group
+		}
+	}
+	return ""
+}
+
+// baseModelName strips the namespace / prefix so vendor regex sees the bare id:
+// "gcli-gemini-2.5-pro" -> "gemini-2.5-pro", "cn:glm-5.3" -> "glm-5.3",
+// "openai/gpt-4o" -> "gpt-4o". Handles ":<ns>", "<ns>/" and known gateway prefixes.
+func baseModelName(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		id = id[i+1:]
+	}
+	if i := strings.Index(id, ":"); i >= 0 {
+		id = id[i+1:]
+	}
+	// strip common gateway prefixes that wrap the real family name
+	for _, pre := range []string{"gcli-", "gcp-", "aws-", "azure-"} {
+		if strings.HasPrefix(id, pre) {
+			id = strings.TrimPrefix(id, pre)
+		}
+	}
+	return id
+}
+
+// seriesContains reports whether id references an OpenAI reasoning series token
+// (o1/o3/o4) as a delimited substring, avoiding false hits inside longer words.
+func seriesContains(id, series string) bool {
+	for i := 0; i+len(series) <= len(id); i++ {
+		if id[i:i+len(series)] == series {
+			left := i == 0 || !(id[i-1] >= 'a' && id[i-1] <= 'z')
+			right := i+len(series) == len(id) || !(id[i+len(series)] >= 'a' && id[i+len(series)] <= 'z')
+			if left && right {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ResolveGroups derives the logical family + capability groups for a model.
+// A model may belong to multiple groups. Family comes from the model id (vendor
+// patterns); capability tags (thinking/tools/vision/web-search) come from id
+// keywords plus any explicit ModelInfo capability metadata; the supported API
+// modes (chat/responses/anthropic) come from the handler Type. This mirrors how
+// cherry-studio / new-api tag models so the panel can group them meaningfully.
+func (m *ModelInfo) ResolveGroups() []string {
+	if m == nil {
+		return nil
+	}
+	if len(m.Groups) > 0 {
+		return append([]string(nil), m.Groups...)
+	}
+	seen := map[string]bool{}
+	groups := make([]string, 0, 6)
+	add := func(g string) {
+		if g != "" && !seen[g] {
+			seen[g] = true
+			groups = append(groups, g)
+		}
+	}
+
+	id := baseModelName(m.ID)
+	t := strings.ToLower(strings.TrimSpace(m.Type))
+
+	// ---- family group (vendor) ----
+	// Type carries the real vendor for oauth-registered models; for plain
+	// openai-compatibility relays the Type is just the adapter, so fall back to
+	// the model-id vendor pattern.
+	var family string
+	switch {
+	case strings.Contains(t, "claude"), strings.Contains(t, "anthropic"):
+		family = "claude"
+	case strings.Contains(t, "gemini"):
+		family = "gemini"
+	case strings.Contains(t, "codex"), strings.Contains(t, "antigravity"):
+		family = "openai"
+	case strings.Contains(t, "image"):
+		family = "image"
+	}
+	if family == "" {
+		family = matchVendor(id)
+	}
+	if family == "" {
+		family = matchVendor(baseModelName(m.OwnedBy))
+	}
+	if family != "" {
+		add(family)
+	}
+
+	// ---- capability tags from id keywords (cherry-studio style heuristics) ----
+	// thinking / reasoning
+	wantThink := strings.Contains(id, "thinking") || strings.Contains(id, "reasoning") ||
+		strings.Contains(id, "-r1") || strings.Contains(id, "qwq") ||
+		strings.Contains(id, "deepseek-v3") || strings.Contains(id, "deepseek-v4") ||
+		seriesContains(id, "o1") || seriesContains(id, "o3") || seriesContains(id, "o4")
+	if strings.Contains(id, "nothinking") || strings.Contains(id, "no-thinking") {
+		wantThink = false
+	}
+	// Only tag "thinking" on an explicit signal. The registry seeds a default
+	// ThinkingSupport (budget-only, Levels cleared) on every openai-compat chat
+	// model, so m.Thinking != nil alone would wrongly tag plain chat models.
+	// A deliberate config (ExplicitThinking or named levels like "none"/"auto")
+	// or an id keyword is a real thinking signal.
+	explicitThink := m.Thinking != nil && (m.ExplicitThinking || len(m.Thinking.Levels) > 0)
+	if wantThink || explicitThink {
+		add("thinking")
+	}
+	// vision / multimodal
+	hasImageModality := false
+	for _, mod := range m.SupportedInputModalities {
+		if strings.EqualFold(strings.TrimSpace(mod), "IMAGE") {
+			hasImageModality = true
+		}
+	}
+	if hasImageModality ||
+		strings.Contains(id, "vision") || strings.Contains(id, "-vl") || strings.Contains(id, "qvq") ||
+		strings.Contains(id, "4o") || strings.Contains(id, "gemini") || strings.Contains(id, "pixtral") ||
+		strings.Contains(id, "cogview") || strings.Contains(id, "cogvideo") {
+		add("vision")
+	}
+	// tools / function calling: explicit metadata OR a chat-family LLM (embedding/
+	// rerank/image-gen excluded). This is the cherrystudio isFunctionCallingModel
+	// heuristic: most chat LLMs accept tools unless they are non-chat SKUs.
+	nonChat := strings.Contains(id, "embed") || strings.Contains(id, "rerank") ||
+		strings.Contains(id, "dall-e") || strings.Contains(id, "tts") ||
+		strings.Contains(id, "whisper") || strings.Contains(id, "moderation") ||
+		strings.Contains(id, "cogview") || strings.Contains(id, "cogvideo") ||
+		strings.Contains(t, "image")
+	if supportsToolCalling(m) || (!nonChat && family != "" && family != "image") {
+		add("tools")
+	}
+	// web search
+	if m.SupportsWebSearch || strings.Contains(id, "search") || strings.Contains(id, "sonar") {
+		add("web-search")
+	}
+
+	// ---- API mode groups ----
+	// Prefer the probed endpoint capabilities of the upstream site; a relay that
+	// only implements chat/completions (e.g. 405 on /responses, /messages) must
+	// NOT be advertised as responses/anthropic even though CPA can translate.
+	if len(m.EndpointCapabilities) > 0 {
+		for _, cap := range m.EndpointCapabilities {
+			switch strings.ToLower(strings.TrimSpace(cap)) {
+			case "chat":
+				add("chat")
+			case "responses":
+				add("responses")
+			case "anthropic", "messages":
+				add("anthropic")
+			}
+		}
+	} else {
+		// Unknown capability: fall back to handler Type. CPA can translate a
+		// chat-compatible model to all three dialects, so an openai-compatible
+		// model defaults to all three; oauth providers get their native mode.
+		switch {
+		case strings.Contains(t, "claude"), strings.Contains(t, "anthropic"):
+			add("anthropic")
+		case strings.Contains(t, "gemini"):
+			add("gemini-api")
+		case strings.Contains(t, "codex"), strings.Contains(t, "antigravity"):
+			add("responses")
+		default:
+			add("chat")
+			add("responses")
+			add("anthropic")
+		}
+	}
+
+	if len(groups) == 0 {
+		add("chat")
+	}
+	return groups
+}
+
+// supportsToolCalling reports whether the model advertises tool/function calling
+// either via OpenAI-style supported_parameters or Gemini-style generation methods.
+func supportsToolCalling(m *ModelInfo) bool {
+	if m == nil {
+		return false
+	}
+	for _, p := range m.SupportedParameters {
+		switch strings.ToLower(strings.TrimSpace(p)) {
+		case "tools", "tool_choice", "functions", "function_call", "parallel_tool_calls":
+			return true
+		}
+	}
+	for _, g := range m.SupportedGenerationMethods {
+		if strings.EqualFold(strings.TrimSpace(g), "generateContent") {
+			return true
+		}
+	}
+	return false
 }

@@ -826,6 +826,11 @@ type OpenAICompatibility struct {
 
 	// RequestScopedErrors configures custom classification rules for upstream errors.
 	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`
+
+	// EndpointCapabilities records which API dialects this upstream actually
+	// serves (probed by the management panel): "chat", "responses", "anthropic".
+	// When empty, capabilities are treated as unknown and every mode is shown.
+	EndpointCapabilities []string `yaml:"endpoint-capabilities,omitempty" json:"endpoint-capabilities,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

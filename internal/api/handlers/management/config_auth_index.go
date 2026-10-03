@@ -56,6 +56,7 @@ type openAICompatibilityWithAuthIndex struct {
 	DisableCooling        *bool                                    `json:"disable-cooling,omitempty"`
 	RequestRetry          *int                                     `json:"request-retry,omitempty"`
 	RequestScopedErrors   []config.RequestScopedErrorRule          `json:"request-scoped-errors,omitempty"`
+	EndpointCapabilities  []string                                 `json:"endpoint-capabilities,omitempty"`
 	AuthIndex             string                                   `json:"auth-index,omitempty"`
 }
 
@@ -350,6 +351,7 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 			DisableCooling:        entry.DisableCooling,
 			RequestRetry:          entry.RequestRetry,
 			RequestScopedErrors:   entry.RequestScopedErrors,
+			EndpointCapabilities:  entry.EndpointCapabilities,
 			AuthIndex:             "",
 		}
 		if len(entry.APIKeyEntries) == 0 {
