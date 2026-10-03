@@ -19,7 +19,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -1272,11 +1271,22 @@ func applyClaudeHeadersWithNativeProfile(
 		misc.EnsureHeader(r.Header, incomingHeaders, "Anthropic-Version", "2023-06-01")
 		misc.EnsureHeader(r.Header, incomingHeaders, "Accept", defaultAccept)
 		misc.EnsureHeader(r.Header, incomingHeaders, "Accept-Encoding", defaultAcceptEncoding)
-		// Caller-owned mode forwards the caller's own User-Agent, but a caller that
-		// sent none must not fall through to Go's transport default
-		// ("Go-http-client/1.1"), which upstreams read as a bot signature. Identify
-		// as CPA instead: honest about the hop, and not a fabricated client.
-		misc.EnsureHeader(r.Header, incomingHeaders, "User-Agent", "CLIProxyAPI/"+buildinfo.Version)
+		// Caller-owned mode forwards the caller's own User-Agent only when it is
+		// already a genuine Claude Code client. Anthropic-compatible upstreams
+		// (Cloudflare-fronted relays) UA-filter and reject curl / Go / CLIProxyAPI
+		// signatures with 403, which then triggers CPA's own cooldown. When the
+		// caller is not Claude Code, present a real claude-cli identity instead.
+		{
+			incomingUA := ""
+			if incomingHeaders != nil {
+				incomingUA = strings.TrimSpace(incomingHeaders.Get("User-Agent"))
+			}
+			if strings.HasPrefix(strings.ToLower(incomingUA), "claude-cli") {
+				r.Header.Set("User-Agent", incomingUA)
+			} else if strings.TrimSpace(r.Header.Get("User-Agent")) == "" || !strings.HasPrefix(strings.ToLower(r.Header.Get("User-Agent")), "claude-cli") {
+				r.Header.Set("User-Agent", "claude-cli/2.1.0 (external, cli)")
+			}
+		}
 		applyBetaHeader()
 		sessionID := ""
 		for _, candidate := range sessionIDs {
@@ -1451,6 +1461,15 @@ func applyClaudeHeadersWithNativeProfile(
 	// combination real Claude Code never sends and the API rejects, and an
 	// overridden Accept-Encoding contradicts the negotiated transport. Both were
 	// reachable because this ran after the whole header set was assembled.
+	// Third-party Anthropic-compatible relays (Cloudflare-fronted) UA-filter and
+	// 403 non claude-cli signatures, which then trips CPA cooldown. Force a real
+	// claude-cli identity for non-Anthropic bases unless a custom header already
+	// pinned a claude-cli UA. api.anthropic.com keeps its reconstructed identity.
+	if !isAnthropicBase {
+		if ua := strings.ToLower(strings.TrimSpace(r.Header.Get("User-Agent"))); !strings.HasPrefix(ua, "claude-cli") {
+			r.Header.Set("User-Agent", "claude-cli/2.1.0 (external, cli)")
+		}
+	}
 	if isAnthropicBase {
 		r.Header.Set("Anthropic-Beta", baseBetas)
 		applyTransportNegotiation()

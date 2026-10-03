@@ -353,7 +353,7 @@ type fallbackRoundTripper struct {
 }
 
 func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if IsAnthropicUpstreamURL(req.URL) {
+	if IsAnthropicUpstreamURL(req.URL) || IsClaudeCompatUpstreamURL(req.URL) {
 		return f.anthropic.RoundTrip(req)
 	}
 	if req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), "chatgpt.com") {
@@ -367,6 +367,9 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 // for Anthropic and a Chrome profile for ChatGPT, with a standard-transport
 // fallback for other hosts.
 func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	// Keep the third-party Anthropic-compatible upstream host set in sync so the
+	// fallback round tripper can route them through the Claude uTLS fingerprint.
+	RegisterClaudeCompatUpstreams(cfg)
 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
 
 	var ctxRoundTripper http.RoundTripper

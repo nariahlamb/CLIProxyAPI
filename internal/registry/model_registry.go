@@ -1895,3 +1895,89 @@ func (r *ModelRegistry) GetModelsForClient(clientID string) []*ModelInfo {
 	models, _ := r.GetModelsAndEpochForClient(clientID)
 	return models
 }
+
+// CooldownEntry describes one client's cooldown/quota/suspension against a model.
+type CooldownEntry struct {
+	ModelID       string     `json:"model"`
+	ClientID      string     `json:"client_id"`
+	QuotaExceeded bool       `json:"quota_exceeded,omitempty"`
+	QuotaUntil    *time.Time `json:"quota_until,omitempty"`
+	Suspended     bool       `json:"suspended,omitempty"`
+	SuspendReason string     `json:"suspend_reason,omitempty"`
+}
+
+// CooldownSnapshot returns a read-only list of all per-client model cooldowns
+// and suspensions, for management visibility.
+func (r *ModelRegistry) CooldownSnapshot() []CooldownEntry {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	out := make([]CooldownEntry, 0)
+	for modelID, reg := range r.models {
+		if reg == nil {
+			continue
+		}
+		for clientID, quotaTime := range reg.QuotaExceededClients {
+			e := CooldownEntry{ModelID: modelID, ClientID: clientID, QuotaExceeded: true}
+			if quotaTime != nil {
+				until := quotaTime.Add(modelQuotaExceededWindow)
+				e.QuotaUntil = &until
+			}
+			out = append(out, e)
+		}
+		for clientID, reason := range reg.SuspendedClients {
+			out = append(out, CooldownEntry{ModelID: modelID, ClientID: clientID, Suspended: true, SuspendReason: reason})
+		}
+	}
+	return out
+}
+
+// ClearAllCooldowns removes every quota-exceeded mark and suspension across all
+// models/clients. Returns the number of marks cleared. Used by management to
+// force-refresh availability without waiting for the cooldown window.
+func (r *ModelRegistry) ClearAllCooldowns() int {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.ensureAvailableModelsCacheLocked()
+	cleared := 0
+	for _, reg := range r.models {
+		if reg == nil {
+			continue
+		}
+		cleared += len(reg.QuotaExceededClients) + len(reg.SuspendedClients)
+		reg.QuotaExceededClients = map[string]*time.Time{}
+		reg.SuspendedClients = map[string]string{}
+	}
+	if cleared > 0 {
+		r.invalidateAvailableModelsCacheLocked()
+	}
+	return cleared
+}
+
+// ClearClientCooldowns removes quota marks and suspensions for one client
+// (optionally restricted to one model when modelID is non-empty).
+func (r *ModelRegistry) ClearClientCooldowns(clientID, modelID string) int {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.ensureAvailableModelsCacheLocked()
+	cleared := 0
+	for mid, reg := range r.models {
+		if reg == nil {
+			continue
+		}
+		if modelID != "" && mid != modelID {
+			continue
+		}
+		if _, ok := reg.QuotaExceededClients[clientID]; ok {
+			delete(reg.QuotaExceededClients, clientID)
+			cleared++
+		}
+		if _, ok := reg.SuspendedClients[clientID]; ok {
+			delete(reg.SuspendedClients, clientID)
+			cleared++
+		}
+	}
+	if cleared > 0 {
+		r.invalidateAvailableModelsCacheLocked()
+	}
+	return cleared
+}
